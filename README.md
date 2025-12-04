@@ -61,8 +61,11 @@ agg_df = agg_df.merge(cluster_counts, on=['Gene', 'Gene name', 'Cell type'], how
 #)
 
 # --- enrichment score calculation  ---
+# gene sums gives me the sum of all nCPM values across all cell types for each gene
 gene_sums = agg_df.groupby('Gene')['nCPM'].transform('sum')
+#gene counts gives me how many cell types entries it has
 gene_counts = agg_df.groupby('Gene')['nCPM'].transform('count')
+#average nCPM across all other cell types for the same gene
 avg_other = (gene_sums - agg_df['nCPM']) / (gene_counts - 1)
 
 # Avoid division by zero or inf
@@ -71,6 +74,38 @@ agg_df['Enrichment score'] = np.where(avg_other > 0, agg_df['nCPM'] / avg_other,
 
 # Rename column nCPM to avg_nCPM
 agg_df = agg_df.rename(columns={'nCPM': 'avg_nCPM'})
+
+# Count how many cell types each gene appears in (based on rows in agg_df)
+gene_celltype_counts = agg_df.groupby('Gene')['Cell type'].transform('count')
+
+# Add a boolean flag: True if the gene is present in only one cell type
+agg_df['single_cell_type_gene'] = (gene_celltype_counts == 1)
+
+# (Optional) If you want to store it as int (1/0) instead of boolean:
+# agg_df['single_cell_type_gene'] = (gene_celltype_counts == 1).astype(int)
+
+# Filter rows where the flag is True
+single_cell_type_rows = agg_df[agg_df['single_cell_type_gene']]
+
+# Select only Gene and Cell type columns
+single_cell_type_df = single_cell_type_rows[['Gene', 'Cell type']].drop_duplicates()
+
+
+# Check if single_cell_type_df is empty
+if single_cell_type_df.empty:
+    print("NO SINGLE CELL GENES FOUND")
+else:
+    print(single_cell_type_df)
+
+# Save agg_df to a TSV file
+agg_df.to_csv('all_gene_cell_enrichment_data.tsv', sep='\t', index=False)
+
+# Save single_cell_type_df to a TSV file
+single_cell_type_df.to_csv('single_cell_type_data.tsv', sep='\t', index=False)
+
+print("Files saved: all_gene_cell_enrichment_data.tsv and single_cell_type_data.tsv")
+
+
 
 # Peek
 print(agg_df.head())
