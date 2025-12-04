@@ -105,8 +105,6 @@ single_cell_type_df.to_csv('single_cell_type_data.tsv', sep='\t', index=False)
 
 print("Files saved: all_gene_cell_enrichment_data.tsv and single_cell_type_data.tsv")
 
-
-
 # Peek
 print(agg_df.head())
 ```
