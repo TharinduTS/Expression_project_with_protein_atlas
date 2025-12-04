@@ -293,6 +293,15 @@ top5_df, thresh = top_percent_global(agg_df, score_col='Enrichment score', pct=0
 print(f"Global top 5% threshold: {thresh}")
 print(top5_df[['Gene', 'Gene name', 'Cell type', 'Enrichment score', 'clusters_used']])
 
+#or select top x rows
+
+# Sort by Enrichment score in descending order and take top 100
+top100 = agg_df.sort_values(by="Enrichment score", ascending=False).head(100)
+
+# Save to TSV file
+top100.to_csv("top100_enrichment.tsv", sep="\t", index=False)
+
+print("Saved top 100 rows to top100_enrichment.tsv")
 
 ```
 double checking output by checking rows for different cell types
