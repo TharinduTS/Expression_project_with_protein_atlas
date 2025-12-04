@@ -53,6 +53,9 @@ else:
 # --- Merge counts into agg_df ---
 agg_df = agg_df.merge(cluster_counts, on=['Gene', 'Gene name', 'Cell type'], how='left')
 
+# Rename column nCPM to avg_nCPM
+agg_df = agg_df.rename(columns={'nCPM': 'avg_nCPM'})
+
 #checking for non numeric values in nCPM to avoid errors
 
 # Convert to numeric, invalid entries become NaN
@@ -110,12 +113,6 @@ agg_df_filtered, dropped = drop_genes_with_no_expression(agg_df, expr_col=None, 
 
 print(f"\033[31mDropped {len(dropped)} row(s) with zero expression across all cell types.\033[0m")
 
-# Count unique gene names after dropping genes with no expression
-n_unique_genes = agg_df['Gene'].dropna().nunique()
-
-# Print in green
-print(f"\033[32mNumber of unique genes remaining: {n_unique_genes}\033[0m")
-
 # Count unique (non-null) values in 'Cell type'
 n_unique = agg_df['Cell type'].dropna().nunique()
 
@@ -130,6 +127,12 @@ print(f"\033[32mNumber of unique cell types: {n_unique}\033[0m")
 # overwrite agg_df:
 agg_df = agg_df_filtered
 
+# Count unique gene names after dropping genes with no expression
+n_unique_genes = agg_df['Gene'].dropna().nunique()
+
+# Print in green
+print(f"\033[32mNumber of unique genes remaining: {n_unique_genes}\033[0m")
+
 # (Optional) Save the cleaned agg_df to TSV
 agg_df.to_csv('all_gene_cell_enrichment_data.cleaned.tsv', sep='\t', index=False)
 
@@ -138,23 +141,87 @@ agg_df.to_csv('all_gene_cell_enrichment_data.cleaned.tsv', sep='\t', index=False
 print("\033[33mCalculating Enrichment Scores....\033[0m")
 
 # --- enrichment score calculation  ---
-# gene sums gives me the sum of all nCPM values across all cell types for each gene
-gene_sums = agg_df.groupby('Gene')['nCPM'].transform('sum')
-#gene counts gives me how many cell types entries it has
-gene_counts = agg_df.groupby('Gene')['nCPM'].transform('count')
-#average nCPM across all other cell types for the same gene
-avg_other = (gene_sums - agg_df['nCPM']) / (gene_counts - 1)
+def add_enrichment(
+    agg_df: pd.DataFrame,
+    gene_col: str = "Gene",
+    value_col: str = "nCPM",
+    out_col: str = "Enrichment score",
+    min_background: float = 1e-3,   # minimum allowed background (denominator)
+    min_expression: float = 0.0,    # minimum required numerator (nCPM) to compute enrichment
+    min_count: int = 2,             # require at least this many cell-type entries per gene
+    pseudocount: float | None = None,  # optional stabilizer added to background (and/or numerator)
+    clip_max: float | None = None      # optional: cap extreme enrichment values
+):
+    """
+    Compute enrichment per row as nCPM / average(nCPM of other cell types for the same gene),
+    with safeguards to avoid infinities and noise from tiny denominators.
 
-# Avoid division by zero or inf
-avg_other = avg_other.replace([np.inf, -np.inf], np.nan)
-agg_df['Enrichment score'] = np.where(avg_other > 0, agg_df['nCPM'] / avg_other, np.inf)
+    Parameters
+    ----------
+    agg_df : DataFrame with at least [gene_col, value_col]
+    gene_col : Name of the gene column
+    value_col : Name of the expression column (e.g., 'nCPM')
+    out_col : Name for the output enrichment column
+    min_background : Minimum allowed background mean (denominator); values below are raised to this
+    min_expression : Minimum required numerator; rows below become NaN
+    min_count : Require at least `min_count` rows for a given gene to compute enrichment
+    pseudocount : If provided, added to background (and optionally numerator) to stabilize low values
+    clip_max : If provided, cap (winsorize) extreme enrichment at this value
+
+    Returns
+    -------
+    df : DataFrame copy with an added enrichment column
+    """
+    df = agg_df.copy()
+    # Ensure numeric; coerce invalids to NaN
+    df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+    # Group-level sums and counts
+    gene_sums   = df.groupby(gene_col)[value_col].transform("sum")
+    gene_counts = df.groupby(gene_col)[value_col].transform("count")
+    # Average of "other" cell types = (sum - current) / (count - 1)
+    denom_counts = gene_counts - 1
+    avg_other = (gene_sums - df[value_col]) / denom_counts
+    # Invalid if there is no "other" (i.e., count <= 1)
+    avg_other = avg_other.mask(denom_counts <= 0, np.nan)
+    # Optional stabilization via pseudocount on the denominator (and numerator if desired)
+    if pseudocount is not None:
+        # You can also add pseudocount to numerator; uncomment if desired:
+        # df[value_col] = df[value_col] + pseudocount
+        avg_other = avg_other + pseudocount
+    # Enforce minimum background: raise small denominators to min_background
+    # (keeps finite ratios instead of inf; if you'd rather flag them, change logic below)
+    denom = np.maximum(avg_other, min_background)
+    # Enforce minimum expression: rows below threshold are set to NaN (not artificially inflated)
+    numer = df[value_col].where(df[value_col] >= min_expression, np.nan)
+    # Safe divide (NaN when denom <= 0 or numer is NaN)
+    df[out_col] = np.divide(
+        numer, denom,
+        out=np.full(df.shape[0], np.nan, dtype=float),
+        where=(denom > 0)
+    )
+    # If avg_other itself is NaN (e.g., insufficient counts), keep NaN
+    df.loc[avg_other.isna(), out_col] = np.nan
+    # Optional: cap extreme ratios to reduce leverage of outliers
+    if clip_max is not None:
+        df[out_col] = df[out_col].clip(upper=clip_max)
+    return df
+
+
+# --- Compute enrichment with sensible safeguards ---
+agg_df = add_enrichment(
+    agg_df,
+    gene_col="Gene",
+    value_col="avg_nCPM",
+    out_col="Enrichment score",
+    min_background=1e-3,     # lift very small denominators
+    min_expression=0.0,      # require >= this to compute enrichment
+    min_count=2,             # at least 2 entries per gene
+    pseudocount=None,        # try setting to e.g. 0.01 for stabilization
+    clip_max=None            # e.g., set to 100 to cap extreme ratios
+)
+#****
 
 print("\033[33mDone calculating\033[0m")
-
-# Rename column nCPM to avg_nCPM
-agg_df = agg_df.rename(columns={'nCPM': 'avg_nCPM'})
-
-
 
 #******
 # --- Choose the expression column (use avg_nCPM if you renamed it) ---
@@ -170,10 +237,10 @@ print(f"\033[33mNumber of cell types for the gene expressed in the least amount 
 # Show rows for single-cell-type genes ---
 single_cell_rows = agg_df[agg_df['single_cell_type_gene']].copy()
 
-if not single_rows.empty:
-    n_genes = single_rows['Gene'].nunique()
+if not single_cell_rows.empty:
+    n_genes = single_cell_rows['Gene'].nunique()
     print(f"\033[32mFound {n_genes} gene(s) expressed in exactly one cell type.\033[0m")
-    print(single_rows.to_string(index=False))
+    print(single_cell_rows.to_string(index=False))
     single_cell_rows.to_csv('single_cell_type_gene_rows.tsv', sep='\t', index=False)
 else:
     print("\033[33mNo genes were found that are only expressed in one cell type\033[0m")
@@ -244,4 +311,3 @@ filtered_df = cell_cluster_data[
 # Display the result
 filtered_df
 ```
-
