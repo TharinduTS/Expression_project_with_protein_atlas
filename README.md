@@ -133,9 +133,6 @@ n_unique_genes = agg_df['Gene'].dropna().nunique()
 # Print in green
 print(f"\033[32mNumber of unique genes remaining: {n_unique_genes}\033[0m")
 
-# (Optional) Save the cleaned agg_df to TSV
-agg_df.to_csv('all_gene_cell_enrichment_data.cleaned.tsv', sep='\t', index=False)
-
 #****
 
 print("\033[33mCalculating Enrichment Scores....\033[0m")
