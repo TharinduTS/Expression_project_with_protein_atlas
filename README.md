@@ -243,57 +243,17 @@ else:
     print("\033[33mNo genes were found that are only expressed in one cell type\033[0m")
 
 #******
+#ssort agg_df by enrichment
+agg_df=agg_df.sort_values(by="Enrichment score", ascending=False)
 
 # Save agg_df to a TSV file
 agg_df.to_csv('all_gene_cell_enrichment_data.tsv', sep='\t', index=False)
-
 print("\033[33mFiles saved: all_gene_cell_enrichment_data.tsv\033[0m")
 
-#selecting rows with highest enrichment values
-#****this is the function
-def top_percent_global(df, score_col='Enrichment score', pct=0.05, include_infinite=True):
-    """
-    Returns the top `pct` fraction of rows by `score_col` across the whole DataFrame.
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Input DataFrame (e.g., agg_df).
-    score_col : str
-        Column name containing enrichment scores.
-    pct : float
-        Fraction for percentile cutoff (e.g., 0.05 = top 5%).
-    include_infinite : bool
-        If True, treat np.inf scores as very large values (included in top).
-        If False, exclude ∞ scores.
-    """
-    work = df.copy()
-    if include_infinite:
-        # Map inf to a very large finite number so they rank at the top
-        work['__score_finite__'] = work[score_col].replace(np.inf, np.finfo(float).max)
-    else:
-        # Replace inf/-inf with NaN and drop them
-        work['__score_finite__'] = work[score_col].replace([np.inf, -np.inf], np.nan)
-    # Drop rows without a usable score
-    work = work.dropna(subset=['__score_finite__'])
-# Compute percentile threshold (e.g., 95th percentile for pct=0.05)
-    threshold = work['__score_finite__'].quantile(1 - pct)
-    # Select rows at or above threshold
-    top_df = work[work['__score_finite__'] >= threshold].copy()
-    top_df = top_df.sort_values(by=score_col, ascending=False)
-    # Clean up helper column
-    top_df = top_df.drop(columns=['__score_finite__'])
-    return top_df, threshold
-
-# Example usage (top 0.05%)
-#*** Change percentile here
-top5_df, thresh = top_percent_global(agg_df, score_col='Enrichment score', pct=0.0005, include_infinite=True)
-print(f"Global top 5% threshold: {thresh}")
-print(top5_df[['Gene', 'Gene name', 'Cell type', 'Enrichment score', 'clusters_used']])
-
-#or select top x rows
+# select top x rows
 
 # Sort by Enrichment score in descending order and take top 100
-top100 = agg_df.sort_values(by="Enrichment score", ascending=False).head(100)
+top100 = agg_df.head(100)
 
 # Save to TSV file
 top100.to_csv("top100_enrichment.tsv", sep="\t", index=False)
