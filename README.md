@@ -277,3 +277,479 @@ filtered_df = cell_cluster_data[
 # Display the result
 filtered_df
 ```
+Finally you can make an interactive html plot with the following python script
+```py
+
+import argparse
+import json
+import pandas as pd
+import plotly.graph_objects as go
+
+# ---------- Data Loading ----------
+def load_tsv(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, sep="\t")
+    # Clean column names
+    df.columns = [c.strip() for c in df.columns]
+    expected = [
+        "Gene", "Gene name", "Cell type", "avg_nCPM",
+        "clusters_used", "Enrichment score", "single_cell_type_gene"
+    ]
+    missing = [c for c in expected if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing expected columns: {missing}")
+
+    # Coerce numeric columns
+    for col in ["avg_nCPM", "clusters_used", "Enrichment score"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # Label: use Gene name, fallback to Gene
+    df["Label"] = df["Gene name"].fillna(df["Gene"])
+
+    # Drop rows missing critical fields
+    df = df.dropna(subset=["Label", "Enrichment score"])
+
+    return df
+
+# ---------- Figure Building ----------
+def build_fig(
+    df: pd.DataFrame,
+    top_n: int = 100,
+    use_log: bool = True,
+    orientation: str = "v",        # 'v' (vertical bars) or 'h' (horizontal)
+    log_dtick: str | None = None,  # e.g., "D1" or "D2" for log minor ticks
+    initial_zoom: int | None = None,  # initial number of bars to show (zoomed view)
+):
+    """
+    Build the Plotly figure and a JSON payload for robust client-side filtering.
+    initial_zoom: if provided, sets initial axis range to show only the first N bars.
+    """
+    import plotly.express as px
+
+    # Filter if using log scale (must be > 0)
+    if use_log:
+        df = df[df["Enrichment score"] > 0]
+
+    # Sort by enrichment and select top N
+    df_plot = df.sort_values("Enrichment score", ascending=False).head(top_n).copy()
+
+    # Prepare customdata for click handler (keeps full row for details)
+    detail_cols = [
+        "Gene", "Gene name", "Cell type", "avg_nCPM",
+        "clusters_used", "Enrichment score", "single_cell_type_gene"
+    ]
+    customdata = df_plot[detail_cols].values
+
+    # Stable color mapping (sorted for reproducibility)
+    colors = px.colors.qualitative.Safe
+    ctypes = sorted(df_plot["Cell type"].astype(str).unique())
+    cmap = {ct: colors[i % len(colors)] for i, ct in enumerate(ctypes)}
+    bar_colors = df_plot["Cell type"].astype(str).map(cmap)
+
+    # Build bar chart
+    if orientation == "v":
+        x_vals = df_plot["Label"]
+        y_vals = df_plot["Enrichment score"]
+        bar = go.Bar(
+            x=x_vals,
+            y=y_vals,
+            customdata=customdata,
+            marker_color=bar_colors,
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Enrichment: %{y:.2f}<br>"
+                "Cell type: %{customdata[2]}<br>"
+                "avg_nCPM: %{customdata[3]}<br>"
+                "clusters_used: %{customdata[4]}<br>"
+                "<extra></extra>"
+            ),
+        )
+    else:
+        x_vals = df_plot["Enrichment score"]
+        y_vals = df_plot["Label"]
+        bar = go.Bar(
+            x=x_vals,
+            y=y_vals,
+            orientation="h",
+            customdata=customdata,
+            marker_color=bar_colors,
+            hovertemplate=(
+                "<b>%{y}</b><br>"
+                "Enrichment: %{x:.2f}<br>"
+                "Cell type: %{customdata[2]}<br>"
+                "avg_nCPM: %{customdata[3]}<br>"
+                "clusters_used: %{customdata[4]}<br>"
+                "<extra></extra>"
+            ),
+        )
+
+    fig = go.Figure(data=[bar])
+
+    # Layout
+    fig.update_layout(
+        title="Gene Enrichment",
+        xaxis_title=("Enrichment score" if orientation == "h" else "Gene name"),
+        yaxis_title=("Gene name" if orientation == "h" else "Enrichment score"),
+        template="plotly_white",
+        height=700,
+        bargap=0.2,
+        margin=dict(l=60, r=30, t=60, b=120),
+        hovermode="closest",
+        legend_title_text="Cell type",
+    )
+
+    # Axes tweaks
+    if orientation == "v":
+        fig.update_xaxes(
+            tickangle=-45,
+            automargin=True,
+            categoryorder="array",
+            categoryarray=list(df_plot["Label"])
+        )
+        if use_log:
+            kwargs = dict(type="log", title="Enrichment score (log scale)")
+            if log_dtick in ("D1", "D2"):
+                kwargs["dtick"] = log_dtick
+            fig.update_yaxes(**kwargs)
+        else:
+            fig.update_yaxes(title="Enrichment score")
+    else:
+        fig.update_yaxes(
+            automargin=True,
+            categoryorder="array",
+            categoryarray=list(df_plot["Label"])
+        )
+        if use_log:
+            kwargs = dict(type="log", title="Enrichment score (log scale)")
+            if log_dtick in ("D1", "D2"):
+                kwargs["dtick"] = log_dtick
+            fig.update_xaxes(**kwargs)
+        else:
+            fig.update_xaxes(title="Enrichment score")
+
+    # Initial zoom (index-based range on the categorical axis)
+    if initial_zoom is not None:
+        zoom_n = max(1, min(int(initial_zoom), len(df_plot)))
+        # Category axis range uses index positions: [-0.5, zoom_n - 0.5]
+        if orientation == "v":
+            fig.update_xaxes(range=[-0.5, zoom_n - 0.5])
+        else:
+            fig.update_yaxes(range=[-0.5, zoom_n - 0.5])
+
+    # Build JSON payload for robust client-side filtering
+    rows = df_plot[[
+        "Gene", "Gene name", "Cell type", "avg_nCPM",
+        "clusters_used", "Enrichment score", "single_cell_type_gene", "Label"
+    ]].to_dict(orient="records")
+
+    payload = {
+        "rows": rows,
+        "colors": cmap,        # cell type -> color
+        "orientation": orientation,
+        "detail_cols": ["Gene","Gene name","Cell type","avg_nCPM","clusters_used","Enrichment score","single_cell_type_gene"],
+        "label_col": "Label",  # for X/Y labels
+        "enrich_col": "Enrichment score"
+    }
+
+    return fig, payload
+
+# ---------- Enhanced HTML (Details + Filters + Search) ----------
+DETAILS_SNIPPET = """
+<style>
+#controls {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  margin: 12px 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+}
+#controls label { font-size: 14px; color: #333; }
+#controls select, #controls input { padding: 6px 8px; font-size: 14px; }
+#controls button { padding: 6px 10px; font-size: 14px; cursor: pointer; }
+#count-info { font-size: 13px; color: #666; margin-left: 8px; }
+#details-panel {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  margin-top: 12px; padding: 12px;
+  border: 1px solid #ddd; border-radius: 8px; background: #fafafa;
+  white-space: pre-wrap; font-size: 14px;
+}
+#details-panel table { border-collapse: collapse; width: 100%; }
+#details-panel td { padding: 4px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+#details-panel td:first-child { font-weight: 600; color: #333; width: 220px; }
+.plotly-graph-div { width: 100% !important; }
+</style>
+
+<div id="controls">
+  <label>Cell type:
+    <select id="celltype-filter"><option value="__all__">All cell types</option></select>
+  </label>
+  <label style="margin-left:12px;">Gene search:
+    <input type="text" id="gene-search" placeholder="e.g., LALBA">
+  </label>
+  <button id="reset-filters" title="Clear filters">Reset</button>
+  <span id="count-info"></span>
+</div>
+
+<div id="details-panel"><em>Click a bar to see full row details here.</em></div>
+
+<!-- The Python side will inject a <script id="chart-data" type="application/json">...</script> before this script -->
+<script>
+(function(){
+  // Wait until the Plotly figure exists and is initialized
+  function initOnceReady() {
+    var gd = document.querySelector('div.plotly-graph-div') || document.querySelector('.js-plotly-plot');
+    var dataTag = document.getElementById('chart-data');
+    if (!gd || !gd.data || !gd.data.length || !dataTag) { setTimeout(initOnceReady, 50); return; }
+
+    // Parse embedded JSON payload from Python
+    var payload = {};
+    try { payload = JSON.parse(dataTag.textContent); } catch(e) { console.error("JSON parse error:", e); return; }
+    var rows = Array.isArray(payload.rows) ? payload.rows : [];
+    var colors = payload.colors || {};
+    var orientation = payload.orientation || 'v';
+    var detailCols = payload.detail_cols || ["Gene","Gene name","Cell type","avg_nCPM","clusters_used","Enrichment score","single_cell_type_gene"];
+    var labelCol = payload.label_col || "Label";
+    var enrichCol = payload.enrich_col || "Enrichment score";
+
+    // Controls
+    var sel = document.getElementById('celltype-filter');
+    var searchBox = document.getElementById('gene-search');
+    var resetBtn = document.getElementById('reset-filters');
+    var panel = document.getElementById('details-panel');
+    var countInfo = document.getElementById('count-info');
+
+    // Number formatter
+    function fmtNumber(val, maxDigits=2) {
+      if (val === null || val === undefined || val === "" || isNaN(val)) return String(val ?? "");
+      var num = Number(val);
+      if (!isFinite(num)) return String(val);
+      return num.toLocaleString('en-US', { maximumFractionDigits: maxDigits });
+    }
+
+    // Build base arrays from rows (authoritative source)
+    var baseLabels = rows.map(function(r){ return r[labelCol]; });
+    var baseEnrich = rows.map(function(r){ return r[enrichCol]; });
+    var baseCustom = rows.map(function(r){
+      return detailCols.map(function(k){ return r[k]; });
+    });
+    var baseColors = rows.map(function(r){
+      var ct = (r["Cell type"] == null ? "" : String(r["Cell type"]).trim());
+      return colors[ct] || '#636EFA';
+    });
+
+    var N = rows.length;
+
+    // Populate unique cell types into dropdown
+    var cellTypesSet = {};
+    for (var i = 0; i < N; i++) {
+      var ct = rows[i]["Cell type"];
+      if (ct != null) {
+        ct = String(ct).trim();
+        if (ct.length) cellTypesSet[ct] = true;
+      }
+    }
+    var cellTypes = Object.keys(cellTypesSet).sort();
+    cellTypes.forEach(function(ct){
+      var opt = document.createElement('option');
+      opt.value = ct; opt.textContent = ct;
+      sel.appendChild(opt);
+    });
+
+    // Details panel render
+    function renderDetails(customdata) {
+      if (!customdata || !customdata.length) return;
+      var html = "<table>";
+      for (var i = 0; i < detailCols.length; i++) {
+        var key = detailCols[i];
+        var val = customdata[i];
+        if (key === "avg_nCPM" || key === "Enrichment score") { val = fmtNumber(val, 2); }
+        html += "<tr><td>" + key + "</td><td>" + (val === null ? "" : val) + "</td></tr>";
+      }
+      html += "</table>";
+      panel.innerHTML = html;
+      panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    // Filtering
+    function applyFilter() {
+      var selectedCT = sel.value;
+      var q = (searchBox.value || "").trim().toLowerCase();
+
+      var fx = [], fy = [], fcd = [], fcol = [];
+      for (var i = 0; i < N; i++) {
+        var row = rows[i];
+        var ct = (row["Cell type"] == null ? "" : String(row["Cell type"]).trim());
+        var geneName = String(row["Gene name"] || "").toLowerCase();
+        var labelLower = String(row[labelCol] || "").toLowerCase();
+
+        var ctOk = (selectedCT === "__all__") || (selectedCT === ct);
+        var qOk = (!q) || geneName.includes(q) || labelLower.includes(q);
+
+        if (ctOk && qOk) {
+          if (orientation === 'h') {
+            fx.push(row[enrichCol]);  // enrichment on x
+            fy.push(row[labelCol]);   // labels on y
+          } else {
+            fx.push(row[labelCol]);   // labels on x
+            fy.push(row[enrichCol]);  // enrichment on y
+          }
+          fcd.push(detailCols.map(function(k){ return row[k]; }));
+          fcol.push(colors[ct] || '#636EFA');
+        }
+      }
+
+      // Restyle robustly
+      var update = { x: [fx], y: [fy], customdata: [fcd], marker: [{ color: fcol }] };
+      Plotly.restyle(gd, update, [0]);
+
+      // Keep category order aligned with filtered labels
+      var relayout = {};
+      if (orientation === 'h') {
+        relayout['yaxis.categoryorder'] = 'array';
+        relayout['yaxis.categoryarray'] = fy;
+      } else {
+        relayout['xaxis.categoryorder'] = 'array';
+        relayout['xaxis.categoryarray'] = fx;
+      }
+      Plotly.relayout(gd, relayout);
+
+      countInfo.textContent = (fx.length) + " shown of " + N;
+    }
+
+    // Wire events (no initial restyle; plot stays intact)
+    sel.addEventListener('change', applyFilter);
+    searchBox.addEventListener('input', applyFilter);
+    resetBtn.addEventListener('click', function(){
+      sel.value = "__all__";
+      searchBox.value = "";
+      applyFilter();
+    });
+
+    // Initial count
+    countInfo.textContent = N + " shown of " + N;
+
+    // Click → details
+    var clickHandler = function(evt) {
+      var e = evt && evt.points ? evt : (evt && evt.detail ? evt.detail : null);
+      if (!e || !e.points || !e.points.length) return;
+      var p = e.points[0];
+      renderDetails(p.customdata);
+    };
+    if (typeof gd.on === 'function') gd.on('plotly_click', clickHandler);
+    else gd.addEventListener('plotly_click', clickHandler);
+  }
+
+  // Start readiness check
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initOnceReady);
+  } else {
+    initOnceReady();
+  }
+})();
+</script>
+"""
+
+# ---------- HEAD meta for mobile ----------
+HEAD_SNIPPET = """<meta name="viewport" content="width=device-width, initial-scale=1">"""
+
+# ---------- HTML Saving (standards-compliant, embeds JSON payload) ----------
+def save_html(
+    fig: go.Figure,
+    out_path: str,
+    payload: dict,
+    self_contained: bool = False,
+    lang_code: str = "en"
+):
+    """
+    Save a robust, standards-compliant HTML:
+      - Ensures <!DOCTYPE html> at the very beginning (No Quirks Mode).
+      - Adds lang="..." on <html>.
+      - Injects viewport meta just after <head>.
+      - Embeds a JSON payload with rows & colors for reliable client-side filtering.
+      - Appends DETAILS_SNIPPET before </body>.
+    """
+    include_js = True if self_contained else "cdn"
+    html = fig.to_html(full_html=True, include_plotlyjs=include_js)
+
+    import re
+
+    # 1) Ensure <!DOCTYPE html> at the very beginning
+    html = html.lstrip("\ufeff\r\n\t ")
+    if not re.match(r"(?is)^<!doctype\s+html>", html):
+        html = "<!DOCTYPE html>\n" + html
+
+    # 2) Ensure <html lang="...">
+    if re.search(r"(?is)<html(?:\s[^>]*)?>", html):
+        if not re.search(r"(?is)<html[^>]*\blang\s*=", html):
+            html = re.sub(r"(?is)<html(\s*)>", f'<html lang="{lang_code}">', html, count=1)
+    else:
+        html = f"<!DOCTYPE html>\n<html lang=\"{lang_code}\">\n{html}\n</html>"
+
+    # 3) Inject <meta name="viewport"> immediately after <head>
+    if re.search(r"(?is)<head\s*>", html):
+        html = re.sub(r"(?is)<head\s*>", "<head>\n" + HEAD_SNIPPET + "\n", html, count=1)
+    else:
+        html = re.sub(
+            r"(?is)(<html[^>]*>)",
+            r"\1\n<head>\n" + HEAD_SNIPPET + "\n</head>\n",
+            html,
+            count=1
+        )
+
+    # 4) Embed JSON payload (safe single <script> with application/json)
+    json_str = json.dumps(payload, ensure_ascii=False)
+    data_block = f'<script id="chart-data" type="application/json">{json_str}</script>\n'
+
+    # Place the data block just before DETAILS_SNIPPET and </body>
+    if re.search(r"(?is)</body\s*>", html):
+        html = re.sub(r"(?is)</body\s*>", data_block + DETAILS_SNIPPET + "\n</body>", html, count=1)
+    else:
+        if not re.search(r"(?is)<body[^>]*>", html):
+            html = re.sub(r"(?is)</head\s*>", "</head>\n<body>\n", html, count=1)
+        html = html + "\n" + data_block + DETAILS_SNIPPET + "\n</body>\n</html>"
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
+
+# ---------- CLI ----------
+def main():
+    ap = argparse.ArgumentParser(description="Make interactive gene enrichment chart (TSV → HTML) with details, cell-type filter, and gene search")
+    ap.add_argument("--file", "-f", required=True, help="Input TSV file (e.g., top100_enrichment.tsv)")
+    ap.add_argument("--out", "-o", default="interactive_markers.html", help="Output HTML file")
+    ap.add_argument("--top", "-n", type=int, default=100, help="Top N genes by enrichment")
+    ap.add_argument("--log", action="store_true", help="Use log scale on enrichment axis")
+    ap.add_argument("--linear", action="store_true", help="Use linear scale on enrichment axis")
+    ap.add_argument("--horizontal", action="store_true", help="Use horizontal bars (better for long labels)")
+    ap.add_argument("--self-contained", action="store_true", help="Embed plotly.js for fully offline HTML")
+    ap.add_argument("--log-digits", choices=["D1","D2"], help="Log-axis minor digits: D1 (all) or D2 (2 & 5)")
+    ap.add_argument("--lang", default="en", help="HTML lang attribute (e.g., 'en', 'en-CA')")
+    ap.add_argument("--initial-zoom", type=int, default=100, help="Initial number of bars to show on load (zoomed view)")
+    args = ap.parse_args()
+
+    if args.log and args.linear:
+        raise SystemExit("Choose either --log or --linear (not both).")
+    use_log = True if args.log or (not args.linear) else False
+    orientation = "h" if args.horizontal else "v"
+
+    df = load_tsv(args.file)
+    fig, payload = build_fig(
+        df,
+        top_n=args.top,
+        use_log=use_log,
+        orientation=orientation,
+        log_dtick=args.log_digits,
+        initial_zoom=args.initial_zoom,  # NEW: apply initial zoom range
+    )
+    save_html(fig, args.out, payload, self_contained=args.self_contained, lang_code=args.lang)
+
+    print(f"Saved: {args.out}")
+
+if __name__ == "__main__":
+    main()
+```
+RUN it like this
+-f -input file
+-0 -output file
+-n no of columns/gene-enrichment combos to process
+--log log transforms the scale
+--self-contained -makes it usable offline
+--initial-zoom 100 -set initial zoom level to this many columns
+```
+ python plot_interactive.py -f all_gene_cell_enrichment_data.tsv -o interactive_markers.html -n 1000 --log --self-contained
+```
