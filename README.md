@@ -278,6 +278,8 @@ filtered_df = cell_cluster_data[
 filtered_df
 ```
 Finally you can make an interactive html plot with the following python script
+
+plot_interactive.py
 ```py
 #!/usr/bin/env python3
 """
@@ -316,16 +318,13 @@ import plotly.express as px
 def load_tsv(path: str) -> pd.DataFrame:
     """
     Load the TSV file with required columns and prepare 'Label' for plotting.
-
     Expects columns:
       "Gene", "Gene name", "Cell type", "avg_nCPM", "clusters_used",
       "Enrichment score", "single_cell_type_gene"
     """
     df = pd.read_csv(path, sep="\t")
-
     # Clean column names
     df.columns = [c.strip() for c in df.columns]
-
     expected = [
         "Gene",
         "Gene name",
@@ -338,17 +337,13 @@ def load_tsv(path: str) -> pd.DataFrame:
     missing = [c for c in expected if c not in df.columns]
     if missing:
         raise ValueError(f"Missing expected columns: {missing}")
-
     # Coerce numeric columns
     for col in ["avg_nCPM", "clusters_used", "Enrichment score"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-
     # Label: prefer Gene name, fallback to Gene
     df["Label"] = df["Gene name"].fillna(df["Gene"])
-
     # Drop rows missing critical fields (label/enrichment)
     df = df.dropna(subset=["Label", "Enrichment score"])
-
     return df
 
 
@@ -930,7 +925,7 @@ RUN it like this
 --self-contained -makes it usable offline
 --initial-zoom 100 -set initial zoom level to this many columns
 ```
-python test.py \
+python plot_interactive.py \
   -f all_gene_cell_enrichment_data.tsv \
   -o interactive_markers_testing.html \
   -n 1000 \
