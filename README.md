@@ -279,7 +279,7 @@ filtered_df
 ```
 Finally you can make an interactive html plot with the following python script
 
-plot_interactive.py
+plot_interactive_final.py
 ```py
 #!/usr/bin/env python3
 """
